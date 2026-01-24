@@ -68,10 +68,11 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getWebSocketUrl } from '../utils/api'
 
+// ========== 【修复1】添加 ID ref，修复 v-model="ID" 未定义的问题 ==========
 const status = ref('login') // 'login' | 'waiting' | 'won' | 'error'
 const userName = ref('')
+const ID = ref('') // 【修复】添加 ID ref
 const prize = ref('')
 const errorMessage = ref('')
 const isIOSDevice = ref(false)
@@ -79,6 +80,22 @@ let ws = null
 let reconnectAttempts = 0
 const maxReconnectAttempts = 5
 let wsConnected = false
+// ========== 【为修复 iOS Safari 问题新增】心跳定时器 ==========
+let heartbeatInterval = null
+const HEARTBEAT_INTERVAL = 20000 // 20秒心跳
+
+// ========== 【为修复 iOS Safari 问题新增】WebSocket 地址生成 ==========
+// 禁止使用 localhost 或 127.0.0.1，必须基于 location.hostname 动态生成
+// 根据当前页面协议自动选择 ws / wss，端口固定为 8000
+const getWebSocketUrl = (path) => {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const hostname = window.location.hostname
+  // 确保不使用 localhost 或 127.0.0.1
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    console.warn('警告：当前 hostname 为 localhost，手机端可能无法连接。请使用局域网 IP 访问。')
+  }
+  return `${protocol}//${hostname}:8000${path}`
+}
 
 // 检测是否为 iOS 设备
 const isIOS = () => {
@@ -100,6 +117,7 @@ const connectWebSocket = () => {
   }
   
   try {
+    // 【修复】使用本地实现的 getWebSocketUrl，基于 location.hostname
     const wsUrl = getWebSocketUrl('/ws/mobile')
     console.log('尝试连接 WebSocket:', wsUrl)
     console.log('当前设备:', isIOSDevice.value ? 'iOS' : '其他')
@@ -125,6 +143,8 @@ const connectWebSocket = () => {
       if (status.value === 'error') {
         status.value = 'login'
       }
+      // ========== 【为修复 iOS Safari 问题新增】启动心跳机制 ==========
+      startHeartbeat()
     }
 
     ws.onmessage = (event) => {
@@ -144,6 +164,8 @@ const connectWebSocket = () => {
     ws.onclose = (event) => {
       console.log('WebSocket 连接关闭', event.code, event.reason)
       wsConnected = false
+      // ========== 【为修复 iOS Safari 问题新增】停止心跳 ==========
+      stopHeartbeat()
       
       // 如果连接失败且不是正常关闭，且当前不是中奖状态
       if (event.code !== 1000 && status.value !== 'won') {
@@ -188,40 +210,83 @@ const connectWebSocket = () => {
   }
 }
 
+// ========== 【为修复 iOS Safari 问题新增】心跳机制 ==========
+const startHeartbeat = () => {
+  stopHeartbeat() // 先清除旧的定时器
+  heartbeatInterval = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: 'ping' }))
+        console.log('发送心跳 ping')
+      } catch (e) {
+        console.error('发送心跳失败:', e)
+      }
+    } else {
+      stopHeartbeat()
+    }
+  }, HEARTBEAT_INTERVAL)
+}
+
+const stopHeartbeat = () => {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval)
+    heartbeatInterval = null
+  }
+}
+
 // 处理 WebSocket 消息
 const handleMessage = (message) => {
+  // ========== 【为修复 iOS Safari 问题新增】处理登录确认 ==========
+  if (message.type === 'login_ok') {
+    // 只有收到 login_ok 后才进入 waiting 状态
+    // 这确保 iOS 设备即使连接慢也能正确加入抽奖池
+    console.log('收到登录确认，进入等待状态')
+    status.value = 'waiting'
+    return
+  }
+  
   if (message.type === 'you_won') {
     prize.value = message.prize || '一等奖'
     status.value = 'won'
     // 震动手机
     vibrate()
   }
+  
+  // ========== 【为修复 iOS Safari 问题新增】处理心跳响应（可选） ==========
+  if (message.type === 'pong') {
+    console.log('收到心跳响应 pong')
+  }
 }
 
-// 加入抽奖
+// ========== 【为修复 iOS Safari 问题修改】joinLottery：显式登录确认机制 ==========
+// 加入抽奖 - 关键修复：必须等待 login_ok 后才进入 waiting 状态
 const joinLottery = async () => {
   if (!userName.value.trim()) {
     return
   }
 
-  // iOS 设备需要确保 WebSocket 连接在用户交互时建立
+  // ========== 【为修复 iOS Safari 问题修改】所有设备都在用户点击时才连接 WebSocket ==========
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     // 先连接 WebSocket
     connectWebSocket()
     
-    // 等待连接成功后再发送
+    // 严格等待连接成功后再发送，确保 readyState === OPEN
     let attempts = 0
     const maxAttempts = 50 // 5秒超时
     
     const checkConnection = setInterval(() => {
       attempts++
+      // 严格检查 readyState === OPEN
       if (ws && ws.readyState === WebSocket.OPEN) {
         clearInterval(checkConnection)
+        // ========== 【为修复 iOS Safari 问题修改】发送 login 消息，但不立即切换状态 ==========
+        // 状态切换将在收到 login_ok 后在 handleMessage 中处理
         ws.send(JSON.stringify({
           type: 'login',
-          name: userName.value.trim()
+          name: userName.value.trim(),
+          id: ID.value.trim() || '' // 发送 ID，如果没有则发送空字符串
         }))
-        status.value = 'waiting'
+        // 注意：这里不设置 status.value = 'waiting'，等待 login_ok
       } else if (attempts >= maxAttempts) {
         clearInterval(checkConnection)
         status.value = 'error'
@@ -229,12 +294,20 @@ const joinLottery = async () => {
       }
     }, 100)
   } else {
-    // 已连接，直接发送
-    ws.send(JSON.stringify({
-      type: 'login',
-      name: userName.value.trim()
-    }))
-    status.value = 'waiting'
+    // 已连接且状态为 OPEN，直接发送（包含 ID）
+    if (ws.readyState === WebSocket.OPEN) {
+      // ========== 【为修复 iOS Safari 问题修改】发送 login，等待 login_ok ==========
+      ws.send(JSON.stringify({
+        type: 'login',
+        name: userName.value.trim(),
+        id: ID.value.trim() || '' // 发送 ID，如果没有则发送空字符串
+      }))
+      // 注意：这里不设置 status.value = 'waiting'，等待 login_ok
+    } else {
+      // 如果状态不是 OPEN，重新连接
+      connectWebSocket()
+      joinLottery() // 递归调用，等待连接后发送
+    }
   }
 }
 
@@ -250,6 +323,7 @@ const vibrate = () => {
 const resetState = () => {
   status.value = 'login'
   userName.value = ''
+  ID.value = '' // 【修复】重置时也清空 ID
   prize.value = ''
   // 可以选择断开连接或保持连接
   // if (ws) {
@@ -275,22 +349,23 @@ const retryConnection = () => {
   connectWebSocket()
 }
 
+// ========== 【修复4】onMounted：只做 iOS 检测，不主动连接 WebSocket ==========
 onMounted(() => {
-  // 检测 iOS 设备
+  // 【修复】只检测 iOS 设备，不主动连接 WebSocket
+  // iOS 设备必须在用户点击按钮后才能连接
+  // 非 iOS 设备也改为在用户点击按钮时连接，保持一致性
   isIOSDevice.value = isIOS()
   
-  // iOS 设备延迟连接，等待页面完全加载
   if (isIOSDevice.value) {
-    // iOS Safari 可能需要用户交互才能建立 WebSocket 连接
-    // 所以不在 onMounted 时自动连接，而是在用户点击按钮时连接
-    console.log('检测到 iOS 设备，等待用户交互后再连接 WebSocket')
+    console.log('检测到 iOS 设备，等待用户点击"加入战场"按钮后连接 WebSocket')
   } else {
-    // 其他设备可以自动连接
-    connectWebSocket()
+    console.log('非 iOS 设备，等待用户点击"加入战场"按钮后连接 WebSocket')
   }
 })
 
 onUnmounted(() => {
+  // ========== 【为修复 iOS Safari 问题新增】清理心跳定时器 ==========
+  stopHeartbeat()
   if (ws) {
     ws.close()
   }
