@@ -44,12 +44,16 @@
 
     <!-- 状态3: 中奖了 -->
     <div v-if="status === 'won'" class="won-state">
-      <div class="won-overlay" @click="resetState">
+      <div class="won-overlay">
         <div class="won-content">
           <div class="won-icon">🎉</div>
           <h1 class="won-title">恭喜你中奖了！</h1>
           <div class="won-prize">{{ prize }}</div>
-          <div class="won-message">点击任意位置继续</div>
+          <div class="won-user-info">
+            <div class="won-user-name">{{ userName }}</div>
+            <div v-if="ID" class="won-user-id">工号：{{ ID }}</div>
+          </div>
+          <button @click="resetState" class="back-button">返回</button>
         </div>
       </div>
     </div>
@@ -614,7 +618,7 @@ onUnmounted(() => {
 .won-prize {
   font-size: 64px;
   font-weight: bold;
-  margin-bottom: 40px;
+  margin-bottom: 30px;
   text-shadow: 3px 3px 6px rgba(0, 0, 0, 0.3);
   background: rgba(255, 255, 255, 0.2);
   padding: 20px 40px;
@@ -624,10 +628,46 @@ onUnmounted(() => {
   animation: fadeInUp 0.6s ease-out 0.4s both;
 }
 
-.won-message {
-  font-size: 20px;
-  opacity: 0.9;
+.won-user-info {
+  margin-bottom: 30px;
   animation: fadeInUp 0.6s ease-out 0.6s both;
+}
+
+.won-user-name {
+  font-size: 32px;
+  font-weight: bold;
+  margin-bottom: 10px;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.won-user-id {
+  font-size: 24px;
+  opacity: 0.9;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.back-button {
+  padding: 15px 40px;
+  font-size: 18px;
+  font-weight: bold;
+  color: white;
+  background: rgba(255, 255, 255, 0.3);
+  border: 2px solid white;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.3s;
+  animation: fadeInUp 0.6s ease-out 0.8s both;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+}
+
+.back-button:hover {
+  background: rgba(255, 255, 255, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+
+.back-button:active {
+  transform: translateY(0);
 }
 
 @keyframes fadeInUp {
