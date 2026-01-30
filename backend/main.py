@@ -1,5 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 import uvicorn
@@ -10,7 +12,25 @@ import pandas as pd
 from datetime import datetime
 import os
 
-app = FastAPI()
+# 导入数据库和后台管理 API
+from database import init_db, get_db
+from admin_api import router as admin_router
+from shake_api import router as shake_router
+
+app = FastAPI(title="新年抽奖系统 API", version="1.0.0")
+
+# 初始化数据库
+init_db()
+
+# 挂载静态文件目录
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# 注册后台管理路由
+app.include_router(admin_router)
+
+# 注册摇一摇游戏路由
+app.include_router(shake_router)
 
 # 配置 CORS
 app.add_middleware(
@@ -143,6 +163,19 @@ class ConnectionManager:
         for conn in disconnected:
             await self.disconnect_screen(conn)
 
+    async def broadcast_screen_control(self, message: Dict):
+        """向大屏广播控制指令（后台管理用）"""
+        disconnected = []
+        for connection in self.screen_connections:
+            try:
+                await connection.send_text(json.dumps(message))
+            except Exception as e:
+                print(f"向大屏发送控制指令失败: {e}")
+                disconnected.append(connection)
+        
+        for conn in disconnected:
+            await self.disconnect_screen(conn)
+
     async def notify_winner_mobile(self, client_id: str, prize: str = "一等奖"):
         """向中奖的手机发送通知"""
         if client_id in self.mobile_connections:
@@ -154,6 +187,21 @@ class ConnectionManager:
                 await self.mobile_connections[client_id]["socket"].send_text(json.dumps(message))
             except Exception as e:
                 print(f"向手机发送中奖消息失败: {e}")
+
+    async def broadcast_shake_message(self, message: Dict):
+        """向所有摇一摇游戏连接广播消息"""
+        # 这里需要维护一个摇一摇游戏的 WebSocket 连接列表
+        # 暂时使用 mobile_connections（可以后续分离）
+        disconnected = []
+        for client_id, info in self.mobile_connections.items():
+            try:
+                await info["socket"].send_text(json.dumps(message))
+            except Exception as e:
+                print(f"向摇一摇客户端发送消息失败: {e}")
+                disconnected.append(client_id)
+        
+        for client_id in disconnected:
+            await self.disconnect_mobile(client_id)
 
 manager = ConnectionManager()
 
@@ -261,6 +309,26 @@ async def reset_lottery():
     global winners_set
     winners_set.clear()
     return {"success": True, "message": "抽奖已重置"}
+
+# ========== 【导出中奖名单】 ==========
+@app.get("/api/export_winners")
+async def export_winners():
+    """
+    导出中奖名单 Excel 文件
+    - 文件由 save_to_excel 写入 EXCEL_FILE
+    - 如果文件不存在，返回 404
+    """
+    file_path = os.path.abspath(EXCEL_FILE)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"导出失败：文件不存在（{EXCEL_FILE}），请先完成一次抽奖")
+
+    # 让浏览器下载
+    filename = f"中奖名单_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+    return FileResponse(
+        path=file_path,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=filename,
+    )
 
 # WebSocket 路由
 @app.websocket("/ws/screen")
